@@ -3,7 +3,7 @@
  * Plugin Name: Recent Posts Plugin
  * Description: A simple plugin to display recent posts using a shortcode.
  * Version: 1.0
- * Author: Your Name
+ * Author: Sharpeii
  */
 
 // Определим пространство имен для плагина
@@ -11,11 +11,11 @@ namespace RecentPostsPlugin;
 
 // Главный класс плагина
 class RecentPostsPlugin {
-    private $option_name = 'recent_posts_plugin_options'; // Имя опции в базе данных для хранения настроек
+    private $option_name = 'recent_posts_plugin'; // Имя опции в базе данных для хранения настроек
     // Конструктор класса
     public function __construct() {
         // Регистрируем шорткод при инициализации
-        add_action('init', array($this, 'register_shortcode'));
+        add_action('wp_loaded', array($this, 'register_shortcode'));  //хук wp_loaded загружается позже init, поэтому вешаем на него, чтобы успели зарегистрироваться все типы постов до регистрации шорткодов
         // Регистрируем страницу настроек в меню
         add_action('admin_menu', array($this, 'add_admin_menu'));
         // Настройки
@@ -26,15 +26,14 @@ class RecentPostsPlugin {
     public function register_shortcode(): void
     {
         // Получаем все зарегистрированные типы постов
-        $post_types = get_post_types(array('public' => true), 'names');
-// Для каждого типа поста создаем свой шорткод
+        $post_types = get_post_types(array('public' => true, ), 'names');
+        // Для каждого типа поста создаем свой шорткод
         foreach ($post_types as $post_type) {
             add_shortcode('recent_posts_' . $post_type, function($atts) use ($post_type) {
                 return $this->display_recent_posts($atts, $post_type);
             });
         }
     }
-
 
     // Вывод списка записей для конкретного типа
     public function display_recent_posts($atts, $post_type): string
@@ -60,34 +59,56 @@ class RecentPostsPlugin {
 
         // Условия для запроса записей
         $args = array(
-            'numberposts' => $atts['posts'],
+            'posts_per_page' => $atts['posts'],
             'post_type'   => $post_type,
             'post_status' => 'publish',
         );
-        // Если указана категория, добавляем фильтр
-        if (!empty($atts['category'])) {
-            $args['category_name'] = $atts['category'];
+
+        // Определение таксономий для типа поста
+        $taxonomies = get_object_taxonomies($post_type, 'objects');
+
+
+        // Добавляем фильтр по категории, если указано
+        if (!empty($atts['category']) && !empty($taxonomies)) {
+            foreach ($taxonomies as $taxonomy) {
+                $term = get_term_by('slug', $atts['category'], $taxonomy->name);
+                if ($term) {
+                    $args['tax_query'] = array(
+                        array(
+                            'taxonomy' => $taxonomy->name,
+                            'field'    => 'slug',
+                            'terms'    => $atts['category'],
+                            'include_children' => false, // Убираем детей, чтобы сосредоточиться на точной категории
+                        ),
+                    );
+
+                    break; // Прерываем после нахождения первой совпадающей таксономии
+                }
+            }
         }
 
-        // Получаем последние записи
-        $recent_posts = wp_get_recent_posts($args);
+        // Запрос через \WP_Query для получения записей
+        $query = new \WP_Query($args);
 
         // Формируем HTML вывод
-        if (!empty($recent_posts)) {
+        if ($query->have_posts()) {
             $output = '<ul>';
-            foreach ($recent_posts as $post) {
-                $output .= '<li><a href="' . get_permalink($post['ID']) . '">' . esc_html($post['post_title']) . '</a></li>';
+            while ($query->have_posts()) {
+                $query->the_post();
+                $output .= '<li><a href="' . get_permalink() . '">' . esc_html(get_the_title()) . '</a></li>';
             }
             $output .= '</ul>';
         } else {
             $output = '<p>No recent posts found for ' . esc_html($post_type) . '.</p>';
         }
+        // Сбрасываем пост после custom query
+        wp_reset_postdata();
+
         // Сохраняем результат в кэше на 10 минут
         wp_cache_set($cache_key, $output, 'recent_posts_plugin', 600);
 
         return $output;
     }
-
 
     // Добавляем пункт меню для настроек
     public function add_admin_menu(): void
@@ -100,7 +121,7 @@ class RecentPostsPlugin {
             array($this, 'settings_page')    // Метод, выводящий страницу настроек
         );
     }
-// Регистрация настроек
+    // Регистрация настроек
     public function register_settings(): void
     {
         register_setting('recent_posts_plugin_group', $this->option_name);
@@ -112,7 +133,6 @@ class RecentPostsPlugin {
         // Получаем все зарегистрированные типы постов
         $post_types = get_post_types(array('public' => true), 'names');
         $options = get_option($this->option_name);
-
         ?>
         <div class="wrap">
             <h1>Recent Posts Plugin Settings</h1>
@@ -140,9 +160,17 @@ class RecentPostsPlugin {
 
                             <td>
                                 <?php
-                                // Получаем категории для данного типа поста
-                                $categories = get_categories(array('taxonomy' => 'category', 'post_type' => $post_type));
+                                // Получаем таксономии для данного типа поста
+                                $taxonomies = get_object_taxonomies($post_type, 'objects');
+                                $categories = [];
+                                foreach ($taxonomies as $taxonomy) {
+                                    $terms = get_terms(array('taxonomy' => $taxonomy->name, 'hide_empty' => true));
+                                    foreach ($terms as $term) {
+                                        $categories[] = $term;
+                                    }
+                                }
                                 ?>
+
                                 <select id="category_<?php echo esc_attr($post_type); ?>">
                                     <option value="">All Categories</option>
                                     <?php foreach ($categories as $category) : ?>
@@ -154,12 +182,11 @@ class RecentPostsPlugin {
                             </td>
                             <td>
                                 <input type="text" id="shortcode_<?php echo esc_attr($post_type); ?>" readonly value="[recent_posts_<?php echo esc_attr($post_type); ?>]" />
+                                <button type="button" class="copy-button" data-target="shortcode_<?php echo esc_attr($post_type); ?>">Копировать</button>
                             </td>
                         </tr>
                     <?php endforeach; ?>
                 </table>
-                <br>
-                <input type="submit" class="button button-primary" value="Save Settings" />
             </form>
         </div>
         <script>
@@ -182,10 +209,23 @@ class RecentPostsPlugin {
                     document.getElementById('shortcode_' + postType).value = shortcode;
                 });
             });
+            // Скрипт для копирования шорткодов в буфер обмена
+            document.querySelectorAll('.copy-button').forEach(button => {
+                button.addEventListener('click', function() {
+                    const targetId = this.getAttribute('data-target');
+                    const shortcode = document.getElementById(targetId).value;
+
+                    navigator.clipboard.writeText(shortcode).then(() => {
+                        alert('Шорткод скопирован в буфер обмена: ' + shortcode);
+                    }).catch(err => {
+                        alert('Ошибка при копировании: ' + err);
+                    });
+                });
+            });
         </script>
 
         <?php
-}
+    }
 }
 
 // Инициализация плагина
